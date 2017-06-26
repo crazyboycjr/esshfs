@@ -37,6 +37,17 @@ AC_CHECK_PROG(UNMOUNT_COMMAND, fusermount, fusermount -u, umount)
 AC_CHECK_LIB([crypto], [EVP_EncryptInit], [],
              [AC_MSG_FAILURE([can't find openssl crypto lib])])
 
+# Extra Functionalities
+AC_ARG_ENABLE([debug], AS_HELP_STRING([--enable-debug],
+			  [build with additional debugging code]),
+			  [CFLAGS += '-g'; AC_DEFINE([MACRO_DEBUG], [], [Debugging])])
+
+# AES key bits
+AC_DEFINE([KEY_BITS], [256], [AES key bits])
+
+# AES block bits
+AC_DEFINE([BLOCK_BITS], [128], [AES block bits])
+
 # TODO: Figure out why we special-case this in Darwin.  Would be nice if
 # the default setting was consistent across platforms so we wouldn't need
 # to care about it here.

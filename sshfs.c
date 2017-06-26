@@ -439,6 +439,13 @@ static struct fuse_opt workaround_opts[] = {
 #define DEBUG(format, args...)						\
 	do { if (sshfs.debug) fprintf(stderr, format, args); } while(0)
 
+#ifdef MACRO_DEBUG
+#define debug(...)						\
+	do { ; fprintf(stderr, __VA_ARGS__); } while(0)
+#else
+#define debug(...)
+#endif
+
 static const char *type_name(uint8_t type)
 {
 	switch(type) {
@@ -2709,7 +2716,7 @@ static int wait_chunk(struct read_chunk *chunk, char *buf, size_t size)
 	       pthread_cond_wait(&chunk->sio.finished, &sshfs.lock);
 	pthread_mutex_unlock(&sshfs.lock);
 
-
+	
 	if (chunk->sio.error) {
 		if (chunk->sio.error != MY_EOF)
 			res = chunk->sio.error;
@@ -2722,6 +2729,7 @@ static int wait_chunk(struct read_chunk *chunk, char *buf, size_t size)
 
 		if (rreq->res < 0) {
 			chunk->sio.error = rreq->res;
+			res = chunk->sio.error;
 			break;
 		} if (rreq->res == 0) {
 			chunk->sio.error = MY_EOF;
@@ -2854,6 +2862,49 @@ static int sshfs_read(const char *path, char *rbuf, size_t size, off_t offset,
 	else
 		return sshfs_async_read(sf, rbuf, size, offset);
 }
+
+int encrypt_read(const char *buf, size_t size, off_t offset,
+				 struct stat *stat, struct sshfs_file *sf,
+				 int (*sshfs_read_func)(struct sshfs_file *, char *, size_t,  off_t));
+
+static int sshfs_fgetattr(const char *path, struct stat *stbuf,
+						  struct fuse_file_info *fi);
+
+static int esshfs_read(const char *path, char *rbuf, size_t size, off_t offset,
+					   struct fuse_file_info *fi)
+{
+#ifdef MACRO_DEBUG
+	fprintf(stderr, "esshfs_read(path=\"%s\", buf=0x%p, size=%ld,"
+		" offset=%ld, fi=0x%p)\n", path,  rbuf, size,  offset, fi);
+	fprintf(stderr, "%.2x %.2x %.2x %.2x\n", rbuf[0], rbuf[1], rbuf[2], rbuf[3]);
+#endif
+
+	int err;
+	struct sshfs_file *sf = get_sshfs_file(fi);
+	(void) path;
+	
+	if (!sshfs_file_is_conn(sf))
+		return -EIO;
+
+	struct stat stbuf;
+	memset(&stbuf, 0, sizeof(struct stat));
+	if (fi)
+		err = sshfs_fgetattr(path, &stbuf, fi);
+	else
+		err = sshfs_getattr(path, &stbuf);
+	if (!err) {
+		/* TODO: check access, write permissions */
+		typeof(&sshfs_sync_read)sshfs_read_func =
+			sshfs.sync_read ? &sshfs_sync_read : &sshfs_async_read;
+
+		err = encrypt_read(rbuf, size, offset, &stbuf,
+						   sf, sshfs_read_func);
+	}
+
+	return err;
+}
+
+
 
 static void sshfs_write_begin(struct request *req)
 {
@@ -3003,6 +3054,79 @@ static int sshfs_write(const char *path, const char *wbuf, size_t size,
 	return err ? err : (int) size;
 }
 
+void print_flags(struct fuse_file_info *fi)
+{
+	if ((fi->flags & O_ACCMODE) == O_RDONLY)
+		debug("RDONLY\n");
+	else if((fi->flags & O_ACCMODE) == O_WRONLY)
+		debug("WRONLY\n");
+	else if ((fi->flags & O_ACCMODE) == O_RDWR)
+		debug("RDWR\n");
+
+	if (fi->flags & O_CREAT)
+		debug("CREAT\n");
+
+	if (fi->flags & O_EXCL)
+		debug("EXCL\n");
+
+	if (fi->flags & O_TRUNC)
+		debug("TRUNC\n");
+}
+
+int encrypt_write(const char *buf, size_t size, off_t offset,
+				  struct stat *stat, struct sshfs_file *sf,
+				  int (*sshfs_write_func)(struct sshfs_file *, const char *, size_t,  off_t),
+				  int (*sshfs_read_func)(struct sshfs_file *, char *, size_t,  off_t));
+
+static int sshfs_fgetattr(const char *path, struct stat *stbuf,
+			  struct fuse_file_info *fi);
+
+static int esshfs_write(const char *path, const char *wbuf, size_t size,
+						off_t offset, struct fuse_file_info *fi)
+{
+#ifdef MACRO_DEBUG
+	debug("esshfs_write(path=\"%s\", buf=0x%p, size=%ld,"
+		" offset=%ld, fi=0x%p)\n", path,  wbuf, size,  offset, fi);
+	debug("%.2x %.2x %.2x %.2x\n", wbuf[0], wbuf[1], wbuf[2], wbuf[3]);
+#endif
+
+	// because we need to do read in encrypt_write, so we change the open flags here
+	int err;
+	struct stat stbuf;
+	memset(&stbuf, 0, sizeof(struct stat));
+	err = sshfs_getattr(path, &stbuf);
+	debug("st_size = %ld\n", stbuf.st_size);
+
+	print_flags(fi);
+	debug("-----\n");
+	fi->flags = O_RDWR;
+	fi->flags &= (~0u ^ O_TRUNC);
+	print_flags(fi);
+	sshfs_open_common(path, 0, fi);
+
+	struct sshfs_file *sf = get_sshfs_file(fi);
+	
+	if (!sshfs_file_is_conn(sf))
+		return -EIO;
+
+	if (fi)
+		err = sshfs_fgetattr(path, &stbuf, fi);
+	else
+		err = sshfs_getattr(path, &stbuf);
+	if (!err) {
+		/* TODO: check access, write permissions */
+		typeof(&sshfs_sync_write)sshfs_write_func =
+			!sshfs.sync_write && !sf->write_error ? &sshfs_async_write : &sshfs_sync_write;
+		typeof(&sshfs_sync_read)sshfs_read_func =
+			sshfs.sync_read ? &sshfs_sync_read : &sshfs_async_read;
+
+		err = encrypt_write(wbuf, size, offset, &stbuf,
+							sf, sshfs_write_func, sshfs_read_func);
+	}
+
+	return err;
+}
+
 static int sshfs_ext_statvfs(const char *path, struct statvfs *stbuf)
 {
 	int err;
@@ -3041,10 +3165,43 @@ static int sshfs_statfs(const char *path, struct statvfs *buf)
 	return 0;
 }
 
+void generate_nonce(char *);
+
 static int sshfs_create(const char *path, mode_t mode,
                         struct fuse_file_info *fi)
 {
 	return sshfs_open_common(path, mode, fi);
+}
+
+static int write_prefix(const char *path, struct fuse_file_info *fi)
+{
+	int err = 0;
+	char buf[BLOCK_BITS / 8];
+	generate_nonce(buf);
+	int size;
+	size = sshfs_write(path, buf, BLOCK_BITS / 8, 0, fi);
+	if (size != BLOCK_BITS / 8) {
+		err = -1;
+	}
+	if (size < 0) {
+		err = size;
+	}
+	return err;
+}
+
+static int esshfs_create(const char *path, mode_t mode,
+                        struct fuse_file_info *fi)
+{
+	int err;
+	err = sshfs_open_common(path, mode, fi);
+
+	print_flags(fi);
+
+	if (err) {
+		return err;
+	}
+
+	return write_prefix(path, fi);
 }
 
 static int sshfs_ftruncate(const char *path, off_t size,
@@ -3106,9 +3263,12 @@ static int sshfs_truncate_zero(const char *path)
 	struct fuse_file_info fi;
 
 	fi.flags = O_WRONLY | O_TRUNC;
+	debug("trunc\n");
 	err = sshfs_open(path, &fi);
-	if (!err)
+	int err2 = write_prefix(path, &fi);
+	if (!err) {
 		sshfs_release(path, &fi);
+	}
 
 	return err;
 }
@@ -3130,13 +3290,14 @@ static int sshfs_truncate_shrink(const char *path, off_t size)
 		return -ENOMEM;
 
 	fi.flags = O_RDONLY;
+	debug("trunc_shrink1\n");
 	res = sshfs_open(path, &fi);
 	if (res)
 		goto out;
 
 	for (offset = 0; offset < size; offset += res) {
 		size_t bufsize = calc_buf_size(size, offset);
-		res = sshfs_read(path, data + offset, bufsize, offset, &fi);
+		res = esshfs_read(path, data + offset, bufsize, offset, &fi);
 		if (res <= 0)
 			break;
 	}
@@ -3145,13 +3306,16 @@ static int sshfs_truncate_shrink(const char *path, off_t size)
 		goto out;
 
 	fi.flags = O_WRONLY | O_TRUNC;
+	debug("trunc_shrink\n");
 	res = sshfs_open(path, &fi);
 	if (res)
 		goto out;
 
+	write_prefix(path, &fi);
+
 	for (offset = 0; offset < size; offset += res) {
 		size_t bufsize = calc_buf_size(size, offset);
-		res = sshfs_write(path, data + offset, bufsize, offset, &fi);
+		res = esshfs_write(path, data + offset, bufsize, offset, &fi);
 		if (res < 0)
 			break;
 	}
@@ -3174,11 +3338,12 @@ static int sshfs_truncate_extend(const char *path, off_t size,
 	if (!fi) {
 		openfi = &tmpfi;
 		openfi->flags = O_WRONLY;
+		debug("trunc_extend\n");
 		res = sshfs_open(path, openfi);
 		if (res)
 			return res;
 	}
-	res = sshfs_write(path, &c, 1, size - 1, openfi);
+	res = esshfs_write(path, &c, 1, size - 1, openfi);
 	if (res == 1)
 		res = sshfs_flush(path, openfi);
 	if (!fi)
@@ -3202,6 +3367,7 @@ static int sshfs_truncate_extend(const char *path, off_t size,
 static int sshfs_truncate_workaround(const char *path, off_t size,
                                      struct fuse_file_info *fi)
 {
+	debug("truncate_workaround\n");
 	if (size == 0)
 		return sshfs_truncate_zero(path);
 	else {
@@ -3260,10 +3426,13 @@ static struct fuse_operations sshfs_oper = {
 		.flush      = sshfs_flush,
 		.fsync      = sshfs_fsync,
 		.release    = sshfs_release,
-		.read       = sshfs_read,
-		.write      = sshfs_write,
+		//.read       = sshfs_read,
+		.read       = esshfs_read,
+		//.write      = sshfs_write,
+		.write		= esshfs_write,
 		.statfs     = sshfs_statfs,
-		.create     = sshfs_create,
+		//.create     = sshfs_create,
+		.create		= esshfs_create,
 		.ftruncate  = sshfs_ftruncate,
 		.fgetattr   = sshfs_fgetattr,
 		.flag_nullpath_ok = 1,
@@ -3778,6 +3947,8 @@ static inline void load_gid_map(void)
 	read_id_map(sshfs.gid_file, &groupname_to_gid, "gid", &sshfs.gid_map, &sshfs.r_gid_map);
 }
 
+void encrypt_init();
+
 #ifdef __APPLE__
 int main(int argc, char *argv[], __unused char *envp[], char **exec_path)
 #else
@@ -3789,6 +3960,8 @@ int main(int argc, char *argv[])
 	char *tmp;
 	char *fsname;
 	const char *sftp_server;
+
+	encrypt_init();
 
 #ifdef __APPLE__
 	if (!realpath(*exec_path, sshfs_program_path)) {
