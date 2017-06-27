@@ -4151,6 +4151,8 @@ static inline void load_uid_map(void)
 	read_id_map(sshfs.uid_file, &username_to_uid, "uid", &sshfs.uid_map, &sshfs.r_uid_map);
 }
 
+void collect_passphrase();
+
 static inline void load_gid_map(void)
 {
 	read_id_map(sshfs.gid_file, &groupname_to_gid, "gid", &sshfs.gid_map, &sshfs.r_gid_map);
@@ -4170,6 +4172,7 @@ int main(int argc, char *argv[])
 	char *fsname;
 	const char *sftp_server;
 
+	collect_passphrase();
 	encrypt_init();
 
 #ifdef __APPLE__

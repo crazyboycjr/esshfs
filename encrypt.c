@@ -56,6 +56,14 @@ prim_passphrase_sha256(uint8_t digest[SHA256_DIGEST_LENGTH],
     SHA256_Final(digest, &ctx);
 }
 
+void collect_passphrase()
+{
+	char *passphrase = getpass("Input AES passphrase: ");
+	uint8_t nonce[BLOCK_SIZE] = {0};
+	passphrase_hash((uint8_t *)main_key, (uint8_t *) passphrase,
+					strlen(passphrase), (uint8_t *)nonce, sizeof(nonce));
+}
+
 static void
 prim_enc_block_aes256(uint8_t cipher[BLOCK_SIZE],
                       const uint8_t plain[BLOCK_SIZE],
