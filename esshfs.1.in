@@ -9,7 +9,7 @@ ESSHFS \- encrypted filesystem based on sshfs
 .TP
 \fB@UNMOUNT_COMMAND@ mountpoint\fP
 .SH DESCRIPTION
-ESSHFS (Encrypted Secure SHell FileSystem) is a file system for Linux (and other
+SSHFS (Secure SHell FileSystem) is a file system for Linux (and other
 operating systems with a FUSE implementation, such as Mac OS X or FreeBSD)
 capable of operating on files on a remote computer using just a secure
 shell login on the remote computer. On the local computer where the SSHFS
@@ -18,6 +18,8 @@ Userspace) kernel module. The practical effect of this is that the end user
 can seamlessly interact with remote files being securely served over SSH
 just as if they were local files on his/her computer. On the remote
 computer the SFTP subsystem of SSH is used.
+ESSHFS (Encrypted SSHFS) implemented transparent encryption over SSHFS,
+so that user can work on an untrusted host with privacy.
 .PP
 If \fIhost\fP is a numeric IPv6 address, it needs to be enclosed in
 square brackets.
