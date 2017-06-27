@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
+#include <execinfo.h>
 
 #include <stdint.h>
 #include <string.h>
@@ -32,6 +33,8 @@
 
 //#define BLOCK_BITS 128
 #define BLOCK_SIZE (BLOCK_BITS / 8)
+
+#define PADDING_OFF (BLOCK_SIZE)
 
 #define passphrase_hash prim_passphrase_sha256
 
@@ -139,11 +142,43 @@ int read_nonce(uint64_t *nonce, struct sshfs_file *sf,
 	return 0;
 }
 
-uint8_t* enc_dec_str(const char *buf)
+int read_padding(int *padding, struct sshfs_file *sf,
+			   int (*sshfs_read_func)(struct sshfs_file *, char *, size_t,  off_t))
+{
+	char buf[BLOCK_SIZE];
+	int ret = sshfs_read_func(sf, buf, BLOCK_SIZE, PADDING_OFF);
+	debug("read_padding: ret = %d\n", ret);
+	for (int i = 0; i < BLOCK_SIZE; i++) {
+		debug("%#.2x", buf[i]);
+	}
+	debug("\n");
+	if (ret < 0) {
+		return ret;
+	}
+	if (ret < BLOCK_SIZE) {
+		fprintf(stderr, "read nonce error\n");
+		return -1;
+	}
+	*padding = (int)buf[0];
+	return 0;
+}
+
+int write_padding(int padding, struct sshfs_file *sf,
+			   int (*sshfs_write_func)(struct sshfs_file *, const char *, size_t,  off_t))
+{
+	char buf[BLOCK_SIZE];
+	memset(buf, 0, sizeof buf);
+	assert(0 <= padding && padding <= BLOCK_SIZE);
+	buf[0] = padding;
+	debug("padding = %d\n", padding);
+	return sshfs_write_func(sf, buf, BLOCK_SIZE, PADDING_OFF);
+}
+
+uint8_t* dec_str(const char *buf, size_t len, int *dec_len)
 {
 	// hard coded nonce
 	uint64_t nonce[BLOCK_BITS / 64] = {0};
-	size_t len = strlen(buf);
+	//size_t len = strlen(buf);
 
 	debug("enc_dec_str: len = %ld\n", len);
 
@@ -151,43 +186,138 @@ uint8_t* enc_dec_str(const char *buf)
 
 	uint8_t *blocks = (uint8_t *)malloc(MAX_BLOCK_SEQUENCE_SIZE + BLOCK_SIZE);
 
+	int padding_length = buf[0];
+	memcpy(blocks, buf + BLOCK_SIZE, len);
+
 	if (len % (BLOCK_SIZE) != 0)
 		len += (BLOCK_SIZE) - (len % (BLOCK_SIZE));
 
 	enc_dec_block_sequence(blocks, len,
 						   main_key, nonce, 0);
 
+	for (int i = 0; i < (int)len; i++)
+		debug("%.2x ", blocks[i]);
+	debug("\n");
+	blocks[len - padding_length] = '\0';
+	*dec_len = len - padding_length;
+    return blocks;
+}
+uint8_t* enc_str(const char *buf, size_t len, int *enc_len)
+{
+	// hard coded nonce
+	uint64_t nonce[BLOCK_BITS / 64] = {0};
+	//size_t len = strlen(buf);
+
+	debug("enc_dec_str: len = %ld\n", len);
+
+	assert(len <= MAX_BLOCK_SEQUENCE_SIZE);
+
+	uint8_t *blocks = (uint8_t *)malloc(MAX_BLOCK_SEQUENCE_SIZE + BLOCK_SIZE);
+
+	blocks[0] = BLOCK_SIZE - len % BLOCK_SIZE;
+	if (blocks[0] == BLOCK_SIZE)
+		blocks[0] = 0;
+	memcpy(blocks + BLOCK_SIZE, buf, len);
+
+	if (len % (BLOCK_SIZE) != 0)
+		len += (BLOCK_SIZE) - (len % (BLOCK_SIZE));
+
+	enc_dec_block_sequence(blocks + BLOCK_SIZE, len,
+						   main_key, nonce, 0);
+
+	for (int i = 0; i < (int)len; i++)
+		debug("%.2x ", blocks[i + BLOCK_SIZE]);
+	debug("\n");
+	*enc_len = len + BLOCK_SIZE;
     return blocks;
 }
 
-char *base64_encode(const unsigned char *data);
-unsigned char *base64_decode(const char *data);
+char *base64_encode(const unsigned char *data, size_t, size_t *);
+unsigned char *base64_decode(const char *data, size_t, size_t *);
 
 char* decrypt_path(const char *path)
 {
 	debug("decrypt_path(path = %s)\n", path);
+
 	char *tpath = strndup(path, strlen(path));
 	size_t length = strlen(path);
 	char *dpath = (char *)malloc(length);
 	memset(dpath, 0, length);
 	int curlen = 0;
-	for (char *ptr = strtok(tpath, "/"); ptr; ptr = strtok(NULL, "/")) {
+	int first_time = 1;
+	for (char *ptr = strtok(tpath, "/"); ptr;
+		 ptr = strtok(NULL, "/"), first_time = 0) {
 		int len = strlen(ptr);
 		if (len == 0) continue;
-		char *bptr = (char *)base64_decode((char *)enc_dec_str(ptr));
-		strcat(dpath, "/");
+		if (!first_time || path[0] == '/') {
+			strcat(dpath, "/");
+			curlen++;
+		}
+		if (strcmp(ptr, "..") == 0) {
+			strcat(dpath, "..");
+			curlen += 2;
+			continue;
+		}
+		if (strcmp(ptr, ".") == 0) {
+			strcat(dpath, ".");
+			curlen += 1;
+			continue;
+		}
+		int dec_len = 0, b64_len = 0;
+		char *tempstr = base64_decode(ptr, len, &b64_len);
+		int temp_len = b64_len;
+		debug("temp_len = %d\n", temp_len);
+		for (int i = 0; i < temp_len; i++)
+			debug("%.2x ", tempstr[i]);
+		debug("\n");
+		char *bptr = dec_str(tempstr, b64_len, &dec_len);
+		//char *bptr = (char *)base64_decode((char *)enc_dec_str(ptr));
+		//char *bptr = dec_str((char *)base64_decode((char *)ptr));
+		//char *bptr = base64_decode((char *)ptr);
 		strcat(dpath, bptr);
-		curlen += 1 + strlen(bptr);
+		curlen += strlen(bptr);
+	}
+	if (curlen == 0) {
+		dpath[curlen++] = '/';
 	}
 	debug("decrypt_path: curlen = %d\n", curlen);
 	dpath[curlen] = '\0';
+	debug("dncrypt_path: dpath = %s\n", dpath);
 	return dpath;
 }
+
+void print_backtrace(void)
+{
+	int j, nptrs;
+#define BT_BUF_SIZE 2048
+	void *buffer[BT_BUF_SIZE];
+	char **strings;
+
+	nptrs = backtrace(buffer, BT_BUF_SIZE);
+	printf("backtrace() returned %d addresses\n", nptrs);
+
+	/* The call backtrace_symbols_fd(buffer, nptrs, STDOUT_FILENO)
+ 	 would produce similar output to the following: */
+
+	strings = backtrace_symbols(buffer, nptrs);
+	if (strings == NULL) {
+		perror("backtrace_symbols");
+		exit(EXIT_FAILURE);
+	}
+
+	for (j = 0; j < nptrs; j++)
+		printf("%s\n", strings[j]);
+
+	free(strings);
+}
+
 
 char* encrypt_path(const char *path)
 {
 	debug("encrypt_path(path = %s)\n", path);
+
 	char *tpath = strndup(path, strlen(path));
+
 	size_t length = strlen(path);
 	int max_interval = 0, last_slash = 0, num_slash = 0;
 	for (int i = 0; i < (int)length; i++) {
@@ -202,30 +332,62 @@ char* encrypt_path(const char *path)
 		max_interval = (int)length - last_slash;
 	num_slash++;
 
-	 length = max_interval / BLOCK_SIZE * BLOCK_SIZE * num_slash * 4 / 3 + num_slash;
+	/* I change below + 100 and all seem to be fine........ no more xuanxue error...... */
+	length = (max_interval / BLOCK_SIZE + 100) * BLOCK_SIZE * num_slash * 4 / 3 + length;
 	char *epath = (char *)malloc(length);
 	memset(epath, 0, length);
+
 	int curlen = 0;
-	for (char *ptr = strtok(tpath, "/"); ptr; ptr = strtok(NULL, "/")) {
+	int first_time = 1;
+	for (char *ptr = strtok(tpath, "/"); ptr;
+		 ptr = strtok(NULL, "/"), first_time = 0) {
 		int len = strlen(ptr);
+		debug("f**k: %s %d\n", ptr, first_time);
 		if (len == 0) continue;
-		char *bptr = base64_encode(enc_dec_str(ptr));
-		strcat(epath, "/");
+		if (!first_time || path[0] == '/') {
+			strcat(epath, "/");
+			curlen++;
+		}
+		if (strcmp(ptr, "..") == 0) {
+			strcat(epath, "..");
+			curlen += 2;
+			continue;
+		}
+		if (strcmp(ptr, ".") == 0) {
+			strcat(epath, ".");
+			curlen += 1;
+			continue;
+		}
+		int enc_len = 0, b64_len = 0;
+		uint8_t *tempstr = enc_str(ptr, len, &enc_len);
+		int temp_len = enc_len;
+		debug("temp_len = %d\n", temp_len);
+		for (int i = 0; i < temp_len; i++)
+			debug("%.2x ", tempstr[i]);
+		debug("\n");
+		char *bptr = base64_encode(tempstr, enc_len, &b64_len);
+		//char *bptr = base64_encode(enc_str(ptr));
+		//char *bptr = base64_encode(ptr);
 		strcat(epath, bptr);
-		curlen += 1 + strlen(bptr);
+		curlen += strlen(bptr);
+	}
+	if (curlen == 0) {
+		epath[curlen++] = '/';
 	}
 	debug("encrypt_path: curlen = %d\n", curlen);
 	epath[curlen] = '\0';
+	debug("encrypt_path: epath = %s\n", epath);
 	return epath;
 }
 
-int encrypt_read(const char *buf, size_t size, off_t offset,
+int encrypt_read(char *buf, size_t size, off_t offset,
 				 struct stat *stat, struct sshfs_file *sf,
 				 int (*sshfs_read_func)(struct sshfs_file *, char *, size_t,  off_t))
 {
 	int err;
 	uint64_t nonce[BLOCK_BITS / 64] = {0};
-	off_t prefix_len = sizeof(nonce);
+	off_t prefix_len = sizeof(nonce) + BLOCK_SIZE;
+	//off_t len = stat->st_size - prefix_len;
 	off_t len = stat->st_size - prefix_len;
 
 	fprintf(stderr, "encrypt_read(size=%ld, offset=%ld)\n", size, offset);
@@ -234,47 +396,69 @@ int encrypt_read(const char *buf, size_t size, off_t offset,
 	if (len < 0 || offset > len) {
 		return -1;
 	}
+	/*
+	if (offset + size > len) {
+		size = len - offset;
+	}
+	*/
+
+	int padding_length = 0;
+	err = read_padding(&padding_length, sf, sshfs_read_func);
+	if (err < 0)
+		return err;
+	debug("padding_length = %d\n", padding_length);
 
 	err = read_nonce(nonce, sf, sshfs_read_func);
 	if (err < 0)
 		return err;
 
-	if (size > MAX_BLOCK_SEQUENCE_SIZE) {
-		size = MAX_BLOCK_SEQUENCE_SIZE;
+	int tsize = size;
+	if (tsize > MAX_BLOCK_SEQUENCE_SIZE) {
+		tsize = MAX_BLOCK_SEQUENCE_SIZE;
+	}
+	memset(buf, 0, size);
+	for (off_t off = offset; off < len - padding_length && off < offset + size; off += tsize) {
+
+		uint8_t blocks[MAX_BLOCK_SEQUENCE_SIZE + (BLOCK_SIZE)];
+
+		uint64_t first_block_num = off / (BLOCK_SIZE);
+		size_t seq_size = tsize + (off % (BLOCK_SIZE));
+
+		if ((off + tsize) % (BLOCK_SIZE) != 0)
+			seq_size += (BLOCK_SIZE) - ((off + tsize) % (BLOCK_SIZE));
+
+		size_t read_size = seq_size;
+		if (seq_size + first_block_num * BLOCK_SIZE >= (size_t)len)
+			read_size = len - first_block_num * BLOCK_SIZE;
+
+		debug("read_size = %d", read_size);
+		int ret = sshfs_read_func(sf, (void *)blocks, read_size,
+								  first_block_num * BLOCK_SIZE + prefix_len);
+		
+		if (ret != (int)read_size) {
+			fprintf(stderr,
+					"sshfs_read_func(): read only %d out of %ld bytes",
+					ret, read_size);
+			return -1;
+		}
+
+		enc_dec_block_sequence(blocks, read_size,
+							   main_key, nonce, first_block_num);
+
+		debug("**********************%d %d %d %d %d %d\n", offset, size, off, tsize, len, padding_length);
+		if (off + tsize >= len - padding_length) {
+			tsize -= off + tsize - (len - padding_length);
+			size = off + tsize - offset;
+		}
+		debug("size = %ld\n", size);
+		//memset(buf, 0, size);
+		memcpy(buf + off - offset, blocks + (off % BLOCK_SIZE), tsize);
+		for (int i = 0; i < tsize; i++)
+			debug("%.2x ", blocks[off % BLOCK_SIZE + i]);
+		debug("\n");
 	}
 
-	uint8_t blocks[MAX_BLOCK_SEQUENCE_SIZE + (BLOCK_SIZE)];
-
-	uint64_t first_block_num = offset / (BLOCK_SIZE);
-	size_t seq_size = size + (offset % (BLOCK_SIZE));
-
-	if ((offset + size) % (BLOCK_SIZE) != 0)
-		seq_size += (BLOCK_SIZE) - ((offset + size) % (BLOCK_SIZE));
-
-	/* read sequence of blocks */
-
-	size_t read_size = seq_size;
-	if (seq_size + first_block_num * BLOCK_SIZE >= (size_t)len)
-		read_size = len - first_block_num * BLOCK_SIZE;
-
-	int ret = sshfs_read_func(sf, (void *)blocks, read_size,
-							  first_block_num * BLOCK_SIZE + prefix_len);
-	
-	if (ret != (int)read_size) {
-		fprintf(stderr,
-				"sshfs_read_func(): read only %d out of %ld bytes",
-				ret, read_size);
-		return -1;
-	}
-
-	/* decrypt sequence of blocks */
-
-	enc_dec_block_sequence(blocks, read_size,
-						   main_key, nonce, first_block_num);
-
-	memset((void *)buf, 0, size);
-	memcpy((void *)buf, blocks + (offset % BLOCK_SIZE), size);
-
+	debug("return size = %d\n", size);
     return size;
 }
 
@@ -285,7 +469,8 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 {
 	int err;
 	uint64_t nonce[BLOCK_BITS / 64] = {0};
-	off_t prefix_len = sizeof(nonce);
+	off_t prefix_len = sizeof(nonce) + BLOCK_SIZE;
+	//off_t len = stat->st_size - prefix_len;
 	off_t len = stat->st_size - prefix_len;
 
 	fprintf(stderr, "hello\n");
@@ -295,6 +480,11 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 	if (len < 0 || offset > len) {
 		return -1;
 	}
+	int padding_length;
+	err = read_padding(&padding_length, sf, sshfs_read_func);
+	if (err < 0)
+		return err;
+	debug("padding_length = %d\n", padding_length);
 
 	err = read_nonce(nonce, sf, sshfs_read_func);
 	if (err < 0)
@@ -324,9 +514,11 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 	size_t read_size = seq_size;
 	if (seq_size + first_block_num * BLOCK_SIZE >= (size_t)len)
 		read_size = len - first_block_num * BLOCK_SIZE;
-	fprintf(stderr, "hello\n");
+
+	debug("read_size = %d seq_size = %d\n", read_size, seq_size);
 	int ret = sshfs_read_func(sf, (void *)blocks, read_size,
 						  first_block_num * BLOCK_SIZE + prefix_len);
+
 	fprintf(stderr, "hello\n");
 	if (ret != (int)read_size) {
 	fprintf(stderr, "hello2\n");
@@ -347,6 +539,10 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 
 	enc_dec_block_sequence(blocks, seq_size,
 						   main_key, nonce, first_block_num);
+	for (int i = 0; i < seq_size; i++) {
+		debug("%.2x ", blocks[i]);
+	}
+	debug("\n");
 
 	/* write it back in encrypted file */
 
@@ -356,6 +552,17 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 	if (err) {
 		fprintf(stderr, "sshfs_write_func error\n");
 		return err;
+	}
+	off_t end = size + first_block_num * BLOCK_SIZE;
+	debug("--------------------------%ld %d %d\n", end, len, BLOCK_SIZE);
+	if (end >= len - BLOCK_SIZE) {
+		/* Append an extra block indicates the bytes of padding */
+		padding_length = BLOCK_SIZE - end % BLOCK_SIZE;
+		if (padding_length == BLOCK_SIZE)
+			padding_length = 0;
+		err = write_padding(padding_length, sf, sshfs_write_func);
+		if (err < 0)
+			return err;
 	}
 
     return size;
@@ -386,14 +593,14 @@ static char *decoding_table = NULL;
 static int mod_table[] = {0, 2, 1};
 
 
-char *base64_encode(const unsigned char *data) {
+char *base64_encode(const unsigned char *data, size_t input_length, size_t *output_length) {
 
-	size_t input_length = strlen((char *)data);
-    size_t output_length = 4 * ((input_length + 2) / 3);
+	//size_t input_length = strlen((char *)data);
+    *output_length = 4 * ((input_length + 2) / 3);
 
-    char *encoded_data = malloc(output_length + 1);
+    char *encoded_data = malloc(*output_length + 1);
     if (encoded_data == NULL) return NULL;
-	encoded_data[output_length] = '\0';
+	encoded_data[*output_length] = '\0';
 
     for (int i = 0, j = 0; i < (int)input_length;) {
 
@@ -410,7 +617,7 @@ char *base64_encode(const unsigned char *data) {
     }
 
     for (int i = 0; i < mod_table[input_length % 3]; i++)
-        encoded_data[output_length - 1 - i] = '=';
+        encoded_data[*output_length - 1 - i] = '=';
 
     return encoded_data;
 }
@@ -428,20 +635,20 @@ void base64_cleanup() {
     free(decoding_table);
 }
 
-unsigned char *base64_decode(const char *data) {
+unsigned char *base64_decode(const char *data, size_t input_length, size_t *output_length) {
 
     if (decoding_table == NULL) build_decoding_table();
 
-	size_t input_length = strlen(data);
+	//size_t input_length = strlen(data);
     if (input_length % 4 != 0) return NULL;
 
-    size_t output_length = input_length / 4 * 3;
-    if (data[input_length - 1] == '=') output_length--;
-    if (data[input_length - 2] == '=') output_length--;
+    *output_length = input_length / 4 * 3;
+    if (data[input_length - 1] == '=') (*output_length)--;
+    if (data[input_length - 2] == '=') (*output_length)--;
 
-    unsigned char *decoded_data = malloc(output_length + 1);
+    unsigned char *decoded_data = malloc(*output_length + 1);
     if (decoded_data == NULL) return NULL;
-	decoded_data[output_length] = '\0';
+	decoded_data[*output_length] = '\0';
 
     for (int i = 0, j = 0; i < (int)input_length;) {
 
@@ -455,9 +662,9 @@ unsigned char *base64_decode(const char *data) {
         + (sextet_c << 1 * 6)
         + (sextet_d << 0 * 6);
 
-        if (j < (int)output_length) decoded_data[j++] = (triple >> 2 * 8) & 0xFF;
-        if (j < (int)output_length) decoded_data[j++] = (triple >> 1 * 8) & 0xFF;
-        if (j < (int)output_length) decoded_data[j++] = (triple >> 0 * 8) & 0xFF;
+        if (j < (int)(*output_length)) decoded_data[j++] = (triple >> 2 * 8) & 0xFF;
+        if (j < (int)(*output_length)) decoded_data[j++] = (triple >> 1 * 8) & 0xFF;
+        if (j < (int)(*output_length)) decoded_data[j++] = (triple >> 0 * 8) & 0xFF;
     }
 
     return decoded_data;
