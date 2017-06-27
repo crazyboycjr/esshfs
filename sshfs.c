@@ -846,6 +846,9 @@ static int buf_get_statvfs(struct buffer *buf, struct statvfs *stbuf)
 	return 0;
 }
 
+char* decrypt_path(const char *path);
+char* encrypt_path(const char *path);
+
 static int buf_get_entries(struct buffer *buf, void *dbuf,
                            fuse_fill_dir_t filler)
 {
@@ -870,7 +873,9 @@ static int buf_get_entries(struct buffer *buf, void *dbuf,
 				    S_ISLNK(stbuf.st_mode)) {
 					stbuf.st_mode = 0;
 				}
-				filler(dbuf, name, &stbuf, 0);
+				/* XXX I do modification here */
+				debug("buf_get_entries: name = %s\n", name);
+				filler(dbuf, decrypt_path(name), &stbuf, 0);
 			}
 		}
 		free(name);
@@ -1897,6 +1902,7 @@ static int sshfs_getattr(const char *path, struct stat *stbuf)
 	struct buffer outbuf;
 	buf_init(&buf, 0);
 	buf_add_path(&buf, path);
+	debug("sshfs_getattr: path = %s\n", path);
 	err = sftp_request(sshfs.follow_symlinks ? SSH_FXP_STAT : SSH_FXP_LSTAT,
 			   &buf, SSH_FXP_ATTRS, &outbuf);
 	if (!err) {
@@ -1907,12 +1913,18 @@ static int sshfs_getattr(const char *path, struct stat *stbuf)
 	return err;
 }
 
+static int esshfs_getattr(const char *path, struct stat *stbuf)
+{
+	return sshfs_getattr(encrypt_path(path), stbuf);
+}
+
 static int sshfs_access(const char *path, int mask)
 {
 	struct stat stbuf;
 	int err = 0;
 
 	if (mask & X_OK) {
+		/* FIXME: why the origin author use sshfs.op->getattr() here? */
 		err = sshfs.op->getattr(path, &stbuf);
 		if (!err) {
 			if (S_ISREG(stbuf.st_mode) &&
@@ -1922,6 +1934,13 @@ static int sshfs_access(const char *path, int mask)
 	}
 	return err;
 }
+
+/*
+static int esshfs_access(const char *path, int mask)
+{
+	return sshfs_access(encrypt_path(path), mask);
+}
+*/
 
 static int count_components(const char *p)
 {
@@ -2011,7 +2030,10 @@ static int sshfs_readlink(const char *path, char *linkbuf, size_t size)
 		   buf_get_string(&name, &link) != -1) {
 			if (sshfs.transform_symlinks)
 				transform_symlink(path, &link);
-			strncpy(linkbuf, link, size - 1);
+			/* XXX: I do some modifications here */
+			debug("sshfs_realink: link = %s\n", link);
+			strncpy(linkbuf, decrypt_path(link), size - 1);
+			//strncpy(linkbuf, link, size - 1);
 			linkbuf[size - 1] = '\0';
 			free(link);
 			err = 0;
@@ -2020,6 +2042,11 @@ static int sshfs_readlink(const char *path, char *linkbuf, size_t size)
 	}
 	buf_free(&buf);
 	return err;
+}
+
+static int esshfs_readlink(const char *path, char *linkbuf, size_t size)
+{
+	return sshfs_readlink(encrypt_path(path), linkbuf, size);
 }
 
 static int sftp_readdir_send(struct request **req, struct buffer *handle)
@@ -2152,6 +2179,11 @@ static int sshfs_opendir(const char *path, struct fuse_file_info *fi)
 	return err;
 }
 
+static int esshfs_opendir(const char *path, struct fuse_file_info *fi)
+{
+	return sshfs_opendir(encrypt_path(path), fi);
+}
+
 static int sshfs_readdir(const char *path, void *dbuf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi)
 {
@@ -2196,6 +2228,11 @@ static int sshfs_mkdir(const char *path, mode_t mode)
 	return err;
 }
 
+static int esshfs_mkdir(const char *path, mode_t mode)
+{
+	return sshfs_mkdir(encrypt_path(path), mode);
+}
+
 static int sshfs_mknod(const char *path, mode_t mode, dev_t rdev)
 {
 	int err;
@@ -2225,6 +2262,11 @@ static int sshfs_mknod(const char *path, mode_t mode, dev_t rdev)
 	return err;
 }
 
+static int esshfs_mknod(const char *path, mode_t mode, dev_t rdev)
+{
+	return sshfs_mknod(encrypt_path(path), mode, rdev);
+}
+
 static int sshfs_symlink(const char *from, const char *to)
 {
 	int err;
@@ -2243,6 +2285,11 @@ static int sshfs_symlink(const char *from, const char *to)
 	return err;
 }
 
+static int esshfs_symlink(const char *from, const char *to)
+{
+	return sshfs_symlink(encrypt_path(from), encrypt_path(to));
+}
+
 static int sshfs_unlink(const char *path)
 {
 	int err;
@@ -2254,6 +2301,11 @@ static int sshfs_unlink(const char *path)
 	return err;
 }
 
+static int esshfs_unlink(const char *path)
+{
+	return sshfs_unlink(encrypt_path(path));
+}
+
 static int sshfs_rmdir(const char *path)
 {
 	int err;
@@ -2263,6 +2315,11 @@ static int sshfs_rmdir(const char *path)
 	err = sftp_request(SSH_FXP_RMDIR, &buf, SSH_FXP_STATUS, NULL);
 	buf_free(&buf);
 	return err;
+}
+
+static int esshfs_rmdir(const char *path)
+{
+	return sshfs_rmdir(encrypt_path(path));
 }
 
 static int sshfs_do_rename(const char *from, const char *to)
@@ -2325,6 +2382,11 @@ static int sshfs_rename(const char *from, const char *to)
 	return err;
 }
 
+static int esshfs_rename(const char *from, const char *to)
+{
+	return sshfs_rename(encrypt_path(from), encrypt_path(to));
+}
+
 static int sshfs_link(const char *from, const char *to)
 {
 	int err = -ENOSYS;
@@ -2344,6 +2406,11 @@ static int sshfs_link(const char *from, const char *to)
 	return err;
 }
 
+static int esshfs_link(const char *from, const char *to)
+{
+	return sshfs_link(encrypt_path(from), encrypt_path(to));
+}
+
 static int sshfs_chmod(const char *path, mode_t mode)
 {
 	int err;
@@ -2356,6 +2423,11 @@ static int sshfs_chmod(const char *path, mode_t mode)
 	err = sftp_request(SSH_FXP_SETSTAT, &buf, SSH_FXP_STATUS, NULL);
 	buf_free(&buf);
 	return err;
+}
+
+static int esshfs_chmod(const char *path, mode_t mode)
+{
+	return sshfs_chmod(encrypt_path(path), mode);
 }
 
 static int sshfs_chown(const char *path, uid_t uid, gid_t gid)
@@ -2391,6 +2463,11 @@ static int sshfs_chown(const char *path, uid_t uid, gid_t gid)
 	return err;
 }
 
+static int esshfs_chown(const char *path, uid_t uid, gid_t gid)
+{
+	return sshfs_chown(encrypt_path(path), uid, gid);
+}
+
 static int sshfs_truncate_workaround(const char *path, off_t size,
                                      struct fuse_file_info *fi);
 
@@ -2419,6 +2496,11 @@ static int sshfs_truncate(const char *path, off_t size)
 	return err;
 }
 
+static int esshfs_truncate(const char *path, off_t size)
+{
+	return sshfs_truncate(encrypt_path(path), size);
+}
+
 static int sshfs_utime(const char *path, struct utimbuf *ubuf)
 {
 	int err;
@@ -2431,6 +2513,11 @@ static int sshfs_utime(const char *path, struct utimbuf *ubuf)
 	err = sftp_request(SSH_FXP_SETSTAT, &buf, SSH_FXP_STATUS, NULL);
 	buf_free(&buf);
 	return err;
+}
+
+static int esshfs_utime(const char *path, struct utimbuf *ubuf)
+{
+	return sshfs_utime(encrypt_path(path), ubuf);
 }
 
 static inline int sshfs_file_is_conn(struct sshfs_file *sf)
@@ -2528,6 +2615,11 @@ static int sshfs_open_common(const char *path, mode_t mode,
 static int sshfs_open(const char *path, struct fuse_file_info *fi)
 {
 	return sshfs_open_common(path, 0, fi);
+}
+
+static int esshfs_open(const char *path, struct fuse_file_info *fi)
+{
+	return sshfs_open(encrypt_path(path), fi);
 }
 
 static inline struct sshfs_file *get_sshfs_file(struct fuse_file_info *fi)
@@ -2869,6 +2961,8 @@ int encrypt_read(const char *buf, size_t size, off_t offset,
 
 static int sshfs_fgetattr(const char *path, struct stat *stbuf,
 						  struct fuse_file_info *fi);
+static int esshfs_fgetattr(const char *path, struct stat *stbuf,
+						  struct fuse_file_info *fi);
 
 static int esshfs_read(const char *path, char *rbuf, size_t size, off_t offset,
 					   struct fuse_file_info *fi)
@@ -2878,20 +2972,32 @@ static int esshfs_read(const char *path, char *rbuf, size_t size, off_t offset,
 		" offset=%ld, fi=0x%p)\n", path,  rbuf, size,  offset, fi);
 	fprintf(stderr, "%.2x %.2x %.2x %.2x\n", rbuf[0], rbuf[1], rbuf[2], rbuf[3]);
 #endif
-
 	int err;
+	struct stat stbuf;
+	memset(&stbuf, 0, sizeof(struct stat));
+	err = sshfs_getattr(path, &stbuf);
+	debug("st_size = %ld\n", stbuf.st_size);
+
+	print_flags(fi);
+	debug("-----\n");
+	//fi->flags = O_RDWR;
+	//fi->flags &= (~0u ^ O_TRUNC);
+	print_flags(fi);
+	sshfs_open_common(path, 0, fi);
+	
+	//int err;
 	struct sshfs_file *sf = get_sshfs_file(fi);
-	(void) path;
 	
 	if (!sshfs_file_is_conn(sf))
 		return -EIO;
 
-	struct stat stbuf;
-	memset(&stbuf, 0, sizeof(struct stat));
+	//struct stat stbuf;
+	//memset(&stbuf, 0, sizeof(struct stat));
 	if (fi)
 		err = sshfs_fgetattr(path, &stbuf, fi);
 	else
 		err = sshfs_getattr(path, &stbuf);
+	debug("esshfs_read: st_size = %ld\n", stbuf.st_size);
 	if (!err) {
 		/* TODO: check access, write permissions */
 		typeof(&sshfs_sync_read)sshfs_read_func =
@@ -2904,6 +3010,11 @@ static int esshfs_read(const char *path, char *rbuf, size_t size, off_t offset,
 	return err;
 }
 
+static int eesshfs_read(const char *path, char *rbuf, size_t size, off_t offset,
+					   struct fuse_file_info *fi)
+{
+	return esshfs_read(encrypt_path(path), rbuf, size, offset, fi);
+}
 
 
 static void sshfs_write_begin(struct request *req)
@@ -3127,6 +3238,13 @@ static int esshfs_write(const char *path, const char *wbuf, size_t size,
 	return err;
 }
 
+static int eesshfs_write(const char *path, const char *wbuf, size_t size,
+						off_t offset, struct fuse_file_info *fi)
+{
+	debug("eesshfs_write: path = %s\n", path);
+	return esshfs_write(encrypt_path(path), wbuf, size, offset, fi);
+}
+
 static int sshfs_ext_statvfs(const char *path, struct statvfs *stbuf)
 {
 	int err;
@@ -3163,6 +3281,11 @@ static int sshfs_statfs(const char *path, struct statvfs *buf)
 		1000ULL * 1024 * 1024 * 1024 / buf->f_frsize;
 	buf->f_files = buf->f_ffree = 1000000000;
 	return 0;
+}
+
+static int esshfs_statfs(const char *path, struct statvfs *buf)
+{
+	return sshfs_statfs(encrypt_path(path), buf);
 }
 
 void generate_nonce(char *);
@@ -3204,6 +3327,13 @@ static int esshfs_create(const char *path, mode_t mode,
 	return write_prefix(path, fi);
 }
 
+static int eesshfs_create(const char *path, mode_t mode,
+                        struct fuse_file_info *fi)
+{
+	debug("eesshfs_create: %s", path);
+	return esshfs_create(encrypt_path(path), mode, fi);
+}
+
 static int sshfs_ftruncate(const char *path, off_t size,
                            struct fuse_file_info *fi)
 {
@@ -3228,6 +3358,12 @@ static int sshfs_ftruncate(const char *path, off_t size,
 	buf_free(&buf);
 
 	return err;
+}
+
+static int esshfs_ftruncate(const char *path, off_t size,
+                           struct fuse_file_info *fi)
+{
+	return sshfs_ftruncate(encrypt_path(path), size, fi);
 }
 
 static int sshfs_fgetattr(const char *path, struct stat *stbuf,
@@ -3255,6 +3391,12 @@ static int sshfs_fgetattr(const char *path, struct stat *stbuf,
 	}
 	buf_free(&buf);
 	return err;
+}
+
+static int esshfs_fgetattr(const char *path, struct stat *stbuf,
+			  struct fuse_file_info *fi)
+{
+	return sshfs_fgetattr(encrypt_path(path), stbuf, fi);
 }
 
 static int sshfs_truncate_zero(const char *path)
@@ -3405,36 +3547,36 @@ static int processing_init(void)
 
 static struct fuse_operations sshfs_oper = {
 		.init       = sshfs_init,
-		.getattr    = sshfs_getattr,
+		.getattr    = esshfs_getattr,
 		.access     = sshfs_access,
-		.opendir    = sshfs_opendir,
+		.opendir    = esshfs_opendir,
 		.readdir    = sshfs_readdir,
 		.releasedir = sshfs_releasedir,
-		.readlink   = sshfs_readlink,
-		.mknod      = sshfs_mknod,
-		.mkdir      = sshfs_mkdir,
-		.symlink    = sshfs_symlink,
-		.unlink     = sshfs_unlink,
-		.rmdir      = sshfs_rmdir,
-		.rename     = sshfs_rename,
-		.link       = sshfs_link,
-		.chmod      = sshfs_chmod,
-		.chown      = sshfs_chown,
-		.truncate   = sshfs_truncate,
-		.utime      = sshfs_utime,
-		.open       = sshfs_open,
+		.readlink   = esshfs_readlink,
+		.mknod      = esshfs_mknod,
+		.mkdir      = esshfs_mkdir,
+		.symlink    = esshfs_symlink,
+		.unlink     = esshfs_unlink,
+		.rmdir      = esshfs_rmdir,
+		.rename     = esshfs_rename,
+		.link       = esshfs_link,
+		.chmod      = esshfs_chmod,
+		.chown      = esshfs_chown,
+		.truncate   = esshfs_truncate,
+		.utime      = esshfs_utime,
+		.open       = esshfs_open,
 		.flush      = sshfs_flush,
 		.fsync      = sshfs_fsync,
 		.release    = sshfs_release,
 		//.read       = sshfs_read,
-		.read       = esshfs_read,
+		.read       = eesshfs_read,
 		//.write      = sshfs_write,
-		.write		= esshfs_write,
-		.statfs     = sshfs_statfs,
+		.write		= eesshfs_write,
+		.statfs     = esshfs_statfs,
 		//.create     = sshfs_create,
-		.create		= esshfs_create,
-		.ftruncate  = sshfs_ftruncate,
-		.fgetattr   = sshfs_fgetattr,
+		.create		= eesshfs_create,
+		.ftruncate  = esshfs_ftruncate,
+		.fgetattr   = esshfs_fgetattr,
 		.flag_nullpath_ok = 1,
 		.flag_nopath = 1,
 };

@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
+#include <execinfo.h>
 
 #include <stdint.h>
 #include <string.h>
@@ -151,12 +152,17 @@ uint8_t* enc_dec_str(const char *buf)
 
 	uint8_t *blocks = (uint8_t *)malloc(MAX_BLOCK_SEQUENCE_SIZE + BLOCK_SIZE);
 
+	memcpy(blocks, buf, len);
+
 	if (len % (BLOCK_SIZE) != 0)
 		len += (BLOCK_SIZE) - (len % (BLOCK_SIZE));
 
 	enc_dec_block_sequence(blocks, len,
 						   main_key, nonce, 0);
 
+	for (int i = 0; i < (int)len; i++)
+		debug("%.2x ", blocks[i]);
+	debug("\n");
     return blocks;
 }
 
@@ -166,28 +172,78 @@ unsigned char *base64_decode(const char *data);
 char* decrypt_path(const char *path)
 {
 	debug("decrypt_path(path = %s)\n", path);
+	return path;
 	char *tpath = strndup(path, strlen(path));
 	size_t length = strlen(path);
 	char *dpath = (char *)malloc(length);
 	memset(dpath, 0, length);
 	int curlen = 0;
-	for (char *ptr = strtok(tpath, "/"); ptr; ptr = strtok(NULL, "/")) {
+	int first_time = 1;
+	for (char *ptr = strtok(tpath, "/"); ptr;
+		 ptr = strtok(NULL, "/"), first_time = 0) {
 		int len = strlen(ptr);
 		if (len == 0) continue;
-		char *bptr = (char *)base64_decode((char *)enc_dec_str(ptr));
-		strcat(dpath, "/");
+		if (!first_time || path[0] == '/') {
+			strcat(dpath, "/");
+			curlen++;
+		}
+		if (strcmp(ptr, "..") == 0) {
+			strcat(dpath, "..");
+			curlen += 2;
+			continue;
+		}
+		if (strcmp(ptr, ".") == 0) {
+			strcat(dpath, ".");
+			curlen += 1;
+			continue;
+		}
+		//char *bptr = (char *)base64_decode((char *)enc_dec_str(ptr));
+		//char *bptr = enc_dec_str((char *)base64_decode((char *)ptr));
+		char *bptr = base64_decode((char *)ptr);
 		strcat(dpath, bptr);
-		curlen += 1 + strlen(bptr);
+		curlen += strlen(bptr);
+	}
+	if (curlen == 0) {
+		dpath[curlen++] = '/';
 	}
 	debug("decrypt_path: curlen = %d\n", curlen);
 	dpath[curlen] = '\0';
+	debug("dncrypt_path: dpath = %s\n", dpath);
 	return dpath;
 }
+
+void print_backtrace(void)
+{
+	int j, nptrs;
+#define BT_BUF_SIZE 2048
+	void *buffer[BT_BUF_SIZE];
+	char **strings;
+
+	nptrs = backtrace(buffer, BT_BUF_SIZE);
+	printf("backtrace() returned %d addresses\n", nptrs);
+
+	/* The call backtrace_symbols_fd(buffer, nptrs, STDOUT_FILENO)
+ 	 would produce similar output to the following: */
+
+	strings = backtrace_symbols(buffer, nptrs);
+	if (strings == NULL) {
+		perror("backtrace_symbols");
+		exit(EXIT_FAILURE);
+	}
+
+	for (j = 0; j < nptrs; j++)
+		printf("%s\n", strings[j]);
+
+	free(strings);
+}
+
 
 char* encrypt_path(const char *path)
 {
 	debug("encrypt_path(path = %s)\n", path);
 	char *tpath = strndup(path, strlen(path));
+	return path;
+
 	size_t length = strlen(path);
 	int max_interval = 0, last_slash = 0, num_slash = 0;
 	for (int i = 0; i < (int)length; i++) {
@@ -202,20 +258,42 @@ char* encrypt_path(const char *path)
 		max_interval = (int)length - last_slash;
 	num_slash++;
 
-	 length = max_interval / BLOCK_SIZE * BLOCK_SIZE * num_slash * 4 / 3 + num_slash;
+	length = max_interval / BLOCK_SIZE * BLOCK_SIZE * num_slash * 4 / 3 + length;
 	char *epath = (char *)malloc(length);
 	memset(epath, 0, length);
+
 	int curlen = 0;
-	for (char *ptr = strtok(tpath, "/"); ptr; ptr = strtok(NULL, "/")) {
+	int first_time = 1;
+	for (char *ptr = strtok(tpath, "/"); ptr;
+		 ptr = strtok(NULL, "/"), first_time = 0) {
 		int len = strlen(ptr);
+		debug("fuck: %s %d\n", ptr, first_time);
 		if (len == 0) continue;
-		char *bptr = base64_encode(enc_dec_str(ptr));
-		strcat(epath, "/");
+		if (!first_time || path[0] == '/') {
+			strcat(epath, "/");
+			curlen++;
+		}
+		if (strcmp(ptr, "..") == 0) {
+			strcat(epath, "..");
+			curlen += 2;
+			continue;
+		}
+		if (strcmp(ptr, ".") == 0) {
+			strcat(epath, ".");
+			curlen += 1;
+			continue;
+		}
+		//char *bptr = base64_encode(enc_dec_str(ptr));
+		char *bptr = base64_encode(ptr);
 		strcat(epath, bptr);
-		curlen += 1 + strlen(bptr);
+		curlen += strlen(bptr);
+	}
+	if (curlen == 0) {
+		epath[curlen++] = '/';
 	}
 	debug("encrypt_path: curlen = %d\n", curlen);
 	epath[curlen] = '\0';
+	debug("encrypt_path: epath = %s\n", epath);
 	return epath;
 }
 
