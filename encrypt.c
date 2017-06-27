@@ -20,6 +20,13 @@
 #include <openssl/aes.h>
 #include <openssl/sha.h>
 
+#ifdef MACRO_DEBUG
+#define debug(...)						\
+	do { ; fprintf(stderr, __VA_ARGS__); } while(0)
+#else
+#define debug(...)
+#endif
+
 //#define KEY_BITS 256
 #define KEY_SIZE (KEY_BITS / 8)
 
@@ -132,6 +139,86 @@ int read_nonce(uint64_t *nonce, struct sshfs_file *sf,
 	return 0;
 }
 
+uint8_t* enc_dec_str(const char *buf)
+{
+	// hard coded nonce
+	uint64_t nonce[BLOCK_BITS / 64] = {0};
+	size_t len = strlen(buf);
+
+	debug("enc_dec_str: len = %ld\n", len);
+
+	assert(len <= MAX_BLOCK_SEQUENCE_SIZE);
+
+	uint8_t *blocks = (uint8_t *)malloc(MAX_BLOCK_SEQUENCE_SIZE + BLOCK_SIZE);
+
+	if (len % (BLOCK_SIZE) != 0)
+		len += (BLOCK_SIZE) - (len % (BLOCK_SIZE));
+
+	enc_dec_block_sequence(blocks, len,
+						   main_key, nonce, 0);
+
+    return blocks;
+}
+
+char *base64_encode(const unsigned char *data);
+unsigned char *base64_decode(const char *data);
+
+char* decrypt_path(const char *path)
+{
+	debug("decrypt_path(path = %s)\n", path);
+	char *tpath = strndup(path, strlen(path));
+	size_t length = strlen(path);
+	char *dpath = (char *)malloc(length);
+	memset(dpath, 0, length);
+	int curlen = 0;
+	for (char *ptr = strtok(tpath, "/"); ptr; ptr = strtok(NULL, "/")) {
+		int len = strlen(ptr);
+		if (len == 0) continue;
+		char *bptr = (char *)base64_decode((char *)enc_dec_str(ptr));
+		strcat(dpath, "/");
+		strcat(dpath, bptr);
+		curlen += 1 + strlen(bptr);
+	}
+	debug("decrypt_path: curlen = %d\n", curlen);
+	dpath[curlen] = '\0';
+	return dpath;
+}
+
+char* encrypt_path(const char *path)
+{
+	debug("encrypt_path(path = %s)\n", path);
+	char *tpath = strndup(path, strlen(path));
+	size_t length = strlen(path);
+	int max_interval = 0, last_slash = 0, num_slash = 0;
+	for (int i = 0; i < (int)length; i++) {
+		if (path[i] == '/') {
+			if (max_interval < i - last_slash)
+				max_interval = i - last_slash;
+			last_slash = i;
+			num_slash++;
+		}
+	}
+	if (max_interval < (int)length - last_slash)
+		max_interval = (int)length - last_slash;
+	num_slash++;
+
+	 length = max_interval / BLOCK_SIZE * BLOCK_SIZE * num_slash * 4 / 3 + num_slash;
+	char *epath = (char *)malloc(length);
+	memset(epath, 0, length);
+	int curlen = 0;
+	for (char *ptr = strtok(tpath, "/"); ptr; ptr = strtok(NULL, "/")) {
+		int len = strlen(ptr);
+		if (len == 0) continue;
+		char *bptr = base64_encode(enc_dec_str(ptr));
+		strcat(epath, "/");
+		strcat(epath, bptr);
+		curlen += 1 + strlen(bptr);
+	}
+	debug("encrypt_path: curlen = %d\n", curlen);
+	epath[curlen] = '\0';
+	return epath;
+}
+
 int encrypt_read(const char *buf, size_t size, off_t offset,
 				 struct stat *stat, struct sshfs_file *sf,
 				 int (*sshfs_read_func)(struct sshfs_file *, char *, size_t,  off_t))
@@ -174,7 +261,6 @@ int encrypt_read(const char *buf, size_t size, off_t offset,
 							  first_block_num * BLOCK_SIZE + prefix_len);
 	
 	if (ret != (int)read_size) {
-	fprintf(stderr, "hello2\n");
 		fprintf(stderr,
 				"sshfs_read_func(): read only %d out of %ld bytes",
 				ret, read_size);
@@ -285,3 +371,95 @@ void encrypt_init()
 {
 	srand((unsigned)time(0));
 }
+
+/* this code below extracts from stackoverflow, I do some modification */
+
+static char encoding_table[] = {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
+                                'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+                                'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
+                                'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f',
+                                'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n',
+                                'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
+                                'w', 'x', 'y', 'z', '0', '1', '2', '3',
+                                '4', '5', '6', '7', '8', '9', '-', '_'};
+static char *decoding_table = NULL;
+static int mod_table[] = {0, 2, 1};
+
+
+char *base64_encode(const unsigned char *data) {
+
+	size_t input_length = strlen((char *)data);
+    size_t output_length = 4 * ((input_length + 2) / 3);
+
+    char *encoded_data = malloc(output_length + 1);
+    if (encoded_data == NULL) return NULL;
+	encoded_data[output_length] = '\0';
+
+    for (int i = 0, j = 0; i < (int)input_length;) {
+
+        uint32_t octet_a = i < (int)input_length ? (unsigned char)data[i++] : 0;
+        uint32_t octet_b = i < (int)input_length ? (unsigned char)data[i++] : 0;
+        uint32_t octet_c = i < (int)input_length ? (unsigned char)data[i++] : 0;
+
+        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
+
+        encoded_data[j++] = encoding_table[(triple >> 3 * 6) & 0x3F];
+        encoded_data[j++] = encoding_table[(triple >> 2 * 6) & 0x3F];
+        encoded_data[j++] = encoding_table[(triple >> 1 * 6) & 0x3F];
+        encoded_data[j++] = encoding_table[(triple >> 0 * 6) & 0x3F];
+    }
+
+    for (int i = 0; i < mod_table[input_length % 3]; i++)
+        encoded_data[output_length - 1 - i] = '=';
+
+    return encoded_data;
+}
+
+void build_decoding_table() {
+
+    decoding_table = malloc(256);
+
+    for (int i = 0; i < 64; i++)
+        decoding_table[(unsigned char) encoding_table[i]] = i;
+}
+
+
+void base64_cleanup() {
+    free(decoding_table);
+}
+
+unsigned char *base64_decode(const char *data) {
+
+    if (decoding_table == NULL) build_decoding_table();
+
+	size_t input_length = strlen(data);
+    if (input_length % 4 != 0) return NULL;
+
+    size_t output_length = input_length / 4 * 3;
+    if (data[input_length - 1] == '=') output_length--;
+    if (data[input_length - 2] == '=') output_length--;
+
+    unsigned char *decoded_data = malloc(output_length + 1);
+    if (decoded_data == NULL) return NULL;
+	decoded_data[output_length] = '\0';
+
+    for (int i = 0, j = 0; i < (int)input_length;) {
+
+        uint32_t sextet_a = data[i] == '=' ? 0 & i++ : decoding_table[(int)data[i++]];
+        uint32_t sextet_b = data[i] == '=' ? 0 & i++ : decoding_table[(int)data[i++]];
+        uint32_t sextet_c = data[i] == '=' ? 0 & i++ : decoding_table[(int)data[i++]];
+        uint32_t sextet_d = data[i] == '=' ? 0 & i++ : decoding_table[(int)data[i++]];
+
+        uint32_t triple = (sextet_a << 3 * 6)
+        + (sextet_b << 2 * 6)
+        + (sextet_c << 1 * 6)
+        + (sextet_d << 0 * 6);
+
+        if (j < (int)output_length) decoded_data[j++] = (triple >> 2 * 8) & 0xFF;
+        if (j < (int)output_length) decoded_data[j++] = (triple >> 1 * 8) & 0xFF;
+        if (j < (int)output_length) decoded_data[j++] = (triple >> 0 * 8) & 0xFF;
+    }
+
+    return decoded_data;
+}
+
