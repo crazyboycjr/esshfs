@@ -3309,6 +3309,17 @@ static int write_prefix(const char *path, struct fuse_file_info *fi)
 	if (size < 0) {
 		err = size;
 	}
+	memset(buf, 0, sizeof buf);
+	// write padding length
+	buf[0] = 0;
+	//											here PADDING_OFF
+	size = sshfs_write(path, buf, BLOCK_BITS / 8, BLOCK_BITS / 8, fi);
+	if (size != BLOCK_BITS / 8) {
+		err = -1;
+	}
+	if (size < 0) {
+		err = size;
+	}
 	return err;
 }
 
