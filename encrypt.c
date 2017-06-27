@@ -34,6 +34,8 @@
 //#define BLOCK_BITS 128
 #define BLOCK_SIZE (BLOCK_BITS / 8)
 
+#define PADDING_OFF (BLOCK_SIZE)
+
 #define passphrase_hash prim_passphrase_sha256
 
 #define enc_block prim_enc_block_aes256
@@ -138,6 +140,38 @@ int read_nonce(uint64_t *nonce, struct sshfs_file *sf,
 	}
 	memcpy((void *)nonce, nonce_buf, BLOCK_SIZE);
 	return 0;
+}
+
+int read_padding(int *padding, struct sshfs_file *sf,
+			   int (*sshfs_read_func)(struct sshfs_file *, char *, size_t,  off_t))
+{
+	char buf[BLOCK_SIZE];
+	int ret = sshfs_read_func(sf, buf, BLOCK_SIZE, PADDING_OFF);
+	debug("read_padding: ret = %d\n", ret);
+	for (int i = 0; i < BLOCK_SIZE; i++) {
+		debug("%#.2x", buf[i]);
+	}
+	debug("\n");
+	if (ret < 0) {
+		return ret;
+	}
+	if (ret < BLOCK_SIZE) {
+		fprintf(stderr, "read nonce error\n");
+		return -1;
+	}
+	*padding = (int)buf[0];
+	return 0;
+}
+
+int write_padding(int padding, struct sshfs_file *sf,
+			   int (*sshfs_write_func)(struct sshfs_file *, const char *, size_t,  off_t))
+{
+	char buf[BLOCK_SIZE];
+	memset(buf, 0, sizeof buf);
+	assert(0 <= padding && padding <= BLOCK_SIZE);
+	buf[0] = padding;
+	debug("padding = %d\n", padding);
+	return sshfs_write_func(sf, buf, BLOCK_SIZE, PADDING_OFF);
 }
 
 uint8_t* enc_dec_str(const char *buf)
@@ -297,14 +331,15 @@ char* encrypt_path(const char *path)
 	return epath;
 }
 
-int encrypt_read(const char *buf, size_t size, off_t offset,
+int encrypt_read(char *buf, size_t size, off_t offset,
 				 struct stat *stat, struct sshfs_file *sf,
 				 int (*sshfs_read_func)(struct sshfs_file *, char *, size_t,  off_t))
 {
 	int err;
 	uint64_t nonce[BLOCK_BITS / 64] = {0};
-	off_t prefix_len = sizeof(nonce);
-	off_t len = stat->st_size - prefix_len;
+	off_t prefix_len = sizeof(nonce) + BLOCK_SIZE;
+	//off_t len = stat->st_size - prefix_len;
+	off_t len = stat->st_size;
 
 	fprintf(stderr, "encrypt_read(size=%ld, offset=%ld)\n", size, offset);
 	fprintf(stderr, "len = %ld\n", len);
@@ -312,47 +347,69 @@ int encrypt_read(const char *buf, size_t size, off_t offset,
 	if (len < 0 || offset > len) {
 		return -1;
 	}
+	/*
+	if (offset + size > len) {
+		size = len - offset;
+	}
+	*/
+
+	int padding_length = 0;
+	err = read_padding(&padding_length, sf, sshfs_read_func);
+	if (err < 0)
+		return err;
+	debug("padding_length = %d\n", padding_length);
 
 	err = read_nonce(nonce, sf, sshfs_read_func);
 	if (err < 0)
 		return err;
 
-	if (size > MAX_BLOCK_SEQUENCE_SIZE) {
-		size = MAX_BLOCK_SEQUENCE_SIZE;
+	int tsize = size;
+	if (tsize > MAX_BLOCK_SEQUENCE_SIZE) {
+		tsize = MAX_BLOCK_SEQUENCE_SIZE;
+	}
+	memset(buf, 0, size);
+	for (off_t off = offset; off < len - padding_length && off < offset + size; off += tsize) {
+
+		uint8_t blocks[MAX_BLOCK_SEQUENCE_SIZE + (BLOCK_SIZE)];
+
+		uint64_t first_block_num = off / (BLOCK_SIZE);
+		size_t seq_size = tsize + (off % (BLOCK_SIZE));
+
+		if ((off + tsize) % (BLOCK_SIZE) != 0)
+			seq_size += (BLOCK_SIZE) - ((off + tsize) % (BLOCK_SIZE));
+
+		size_t read_size = seq_size;
+		if (seq_size + first_block_num * BLOCK_SIZE >= (size_t)len)
+			read_size = len - first_block_num * BLOCK_SIZE;
+
+		debug("read_size = %d", read_size);
+		int ret = sshfs_read_func(sf, (void *)blocks, read_size,
+								  first_block_num * BLOCK_SIZE + prefix_len);
+		
+		if (ret != (int)read_size) {
+			fprintf(stderr,
+					"sshfs_read_func(): read only %d out of %ld bytes",
+					ret, read_size);
+			return -1;
+		}
+
+		enc_dec_block_sequence(blocks, read_size,
+							   main_key, nonce, first_block_num);
+
+		debug("**********************%d %d %d %d %d %d\n", offset, size, off, tsize, len, padding_length);
+		if (off + tsize >= len - padding_length) {
+			tsize -= off + tsize - (len - padding_length);
+			size = off + tsize - offset;
+		}
+		debug("size = %ld\n", size);
+		//memset(buf, 0, size);
+		memcpy(buf + off - offset, blocks + (off % BLOCK_SIZE), tsize);
+		for (int i = 0; i < tsize; i++)
+			debug("%.2x ", blocks[off % BLOCK_SIZE + i]);
+		debug("\n");
 	}
 
-	uint8_t blocks[MAX_BLOCK_SEQUENCE_SIZE + (BLOCK_SIZE)];
-
-	uint64_t first_block_num = offset / (BLOCK_SIZE);
-	size_t seq_size = size + (offset % (BLOCK_SIZE));
-
-	if ((offset + size) % (BLOCK_SIZE) != 0)
-		seq_size += (BLOCK_SIZE) - ((offset + size) % (BLOCK_SIZE));
-
-	/* read sequence of blocks */
-
-	size_t read_size = seq_size;
-	if (seq_size + first_block_num * BLOCK_SIZE >= (size_t)len)
-		read_size = len - first_block_num * BLOCK_SIZE;
-
-	int ret = sshfs_read_func(sf, (void *)blocks, read_size,
-							  first_block_num * BLOCK_SIZE + prefix_len);
-	
-	if (ret != (int)read_size) {
-		fprintf(stderr,
-				"sshfs_read_func(): read only %d out of %ld bytes",
-				ret, read_size);
-		return -1;
-	}
-
-	/* decrypt sequence of blocks */
-
-	enc_dec_block_sequence(blocks, read_size,
-						   main_key, nonce, first_block_num);
-
-	memset((void *)buf, 0, size);
-	memcpy((void *)buf, blocks + (offset % BLOCK_SIZE), size);
-
+	debug("return size = %d\n", size);
     return size;
 }
 
@@ -363,8 +420,9 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 {
 	int err;
 	uint64_t nonce[BLOCK_BITS / 64] = {0};
-	off_t prefix_len = sizeof(nonce);
-	off_t len = stat->st_size - prefix_len;
+	off_t prefix_len = sizeof(nonce) + BLOCK_SIZE;
+	//off_t len = stat->st_size - prefix_len;
+	off_t len = stat->st_size;
 
 	fprintf(stderr, "hello\n");
 	fprintf(stderr, "encrypt_write(size=%ld, offset=%ld)\n", size, offset);
@@ -373,6 +431,11 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 	if (len < 0 || offset > len) {
 		return -1;
 	}
+	int padding_length;
+	err = read_padding(&padding_length, sf, sshfs_read_func);
+	if (err < 0)
+		return err;
+	debug("padding_length = %d\n", padding_length);
 
 	err = read_nonce(nonce, sf, sshfs_read_func);
 	if (err < 0)
@@ -402,9 +465,11 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 	size_t read_size = seq_size;
 	if (seq_size + first_block_num * BLOCK_SIZE >= (size_t)len)
 		read_size = len - first_block_num * BLOCK_SIZE;
-	fprintf(stderr, "hello\n");
+
+	debug("read_size = %d seq_size = %d\n", read_size, seq_size);
 	int ret = sshfs_read_func(sf, (void *)blocks, read_size,
 						  first_block_num * BLOCK_SIZE + prefix_len);
+
 	fprintf(stderr, "hello\n");
 	if (ret != (int)read_size) {
 	fprintf(stderr, "hello2\n");
@@ -425,6 +490,10 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 
 	enc_dec_block_sequence(blocks, seq_size,
 						   main_key, nonce, first_block_num);
+	for (int i = 0; i < seq_size; i++) {
+		debug("%.2x ", blocks[i]);
+	}
+	debug("\n");
 
 	/* write it back in encrypted file */
 
@@ -434,6 +503,17 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 	if (err) {
 		fprintf(stderr, "sshfs_write_func error\n");
 		return err;
+	}
+	off_t end = size + first_block_num * BLOCK_SIZE;
+	debug("--------------------------%ld %d %d\n", end, len, BLOCK_SIZE);
+	if (end >= len - BLOCK_SIZE) {
+		/* Append an extra block indicates the bytes of padding */
+		padding_length = BLOCK_SIZE - end % BLOCK_SIZE;
+		if (padding_length == BLOCK_SIZE)
+			padding_length = 0;
+		err = write_padding(padding_length, sf, sshfs_write_func);
+		if (err < 0)
+			return err;
 	}
 
     return size;
