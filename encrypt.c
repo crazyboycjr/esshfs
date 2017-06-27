@@ -387,8 +387,8 @@ int encrypt_read(char *buf, size_t size, off_t offset,
 	int err;
 	uint64_t nonce[BLOCK_BITS / 64] = {0};
 	off_t prefix_len = sizeof(nonce) + BLOCK_SIZE;
-	//off_t len = stat->st_size - prefix_len;
 	off_t len = stat->st_size - prefix_len;
+	//off_t len = stat->st_size;
 
 	fprintf(stderr, "encrypt_read(size=%ld, offset=%ld)\n", size, offset);
 	fprintf(stderr, "len = %ld\n", len);
@@ -470,8 +470,8 @@ int encrypt_write(const char *buf, size_t size, off_t offset,
 	int err;
 	uint64_t nonce[BLOCK_BITS / 64] = {0};
 	off_t prefix_len = sizeof(nonce) + BLOCK_SIZE;
-	//off_t len = stat->st_size - prefix_len;
 	off_t len = stat->st_size - prefix_len;
+	//off_t len = stat->st_size;
 
 	fprintf(stderr, "hello\n");
 	fprintf(stderr, "encrypt_write(size=%ld, offset=%ld)\n", size, offset);

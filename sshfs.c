@@ -1895,6 +1895,17 @@ static int sftp_request(uint8_t type, const struct buffer *buf,
 	return sftp_request_iov(type, &iov, 1, expect_type, outbuf);
 }
 
+int read_padding(int *padding, struct sshfs_file *sf,
+			   int (*sshfs_read_func)(struct sshfs_file *, char *, size_t,  off_t));
+
+static int sshfs_sync_read(struct sshfs_file *sf, char *buf, size_t size,
+                           off_t offset);
+static int sshfs_async_read(struct sshfs_file *sf, char *rbuf, size_t size,
+                            off_t offset);
+static int sshfs_open_common(const char *path, mode_t mode,
+                             struct fuse_file_info *fi);
+static inline struct sshfs_file *get_sshfs_file(struct fuse_file_info *fi);
+
 static int sshfs_getattr(const char *path, struct stat *stbuf)
 {
 	int err;
@@ -1910,6 +1921,26 @@ static int sshfs_getattr(const char *path, struct stat *stbuf)
 		buf_free(&outbuf);
 	}
 	buf_free(&buf);
+
+	/*
+	int padding_length = 0;
+	struct fuse_file_info fi;
+	memset(&fi, 0, sizeof(struct fuse_file_info));
+	fi.flags |= O_RDONLY;
+	err = sshfs_open_common(path, 0, &fi);
+	debug("path = %s, err = %d\n", path, err);
+	if (err < 0)
+		return err;
+	struct sshfs_file *sf = get_sshfs_file(&fi);
+	if (sshfs.sync_read)
+		read_padding(&padding_length, sf, &sshfs_sync_read);
+	else
+		read_padding(&padding_length, sf, &sshfs_async_read);
+	debug("padding_length = %d\n", padding_length);
+	stbuf->st_size -= padding_length + BLOCK_BITS / 8 * 2;
+	debug("st_size = %d\n", stbuf->st_size);
+	*/
+
 	return err;
 }
 
@@ -2601,9 +2632,22 @@ static int sshfs_open_common(const char *path, mode_t mode,
 	}
 
 	if (!err) {
-		cache_add_attr(path, &stbuf, wrctr);
+		/* Modify here */
 		buf_finish(&sf->handle);
 		fi->fh = (unsigned long) sf;
+
+		/*
+		int padding_length = 0;
+		if (sshfs.sync_read)
+			read_padding(&padding_length, sf, &sshfs_sync_read);
+		else
+			read_padding(&padding_length, sf, &sshfs_async_read);
+		debug("padding_length = %d\n", padding_length);
+		stbuf.st_size -= padding_length + BLOCK_BITS / 8 * 2;
+		debug("st_size = %d\n", stbuf.st_size);
+		*/
+
+		cache_add_attr(path, &stbuf, wrctr);
 	} else {
 		cache_invalidate(path);
 		g_free(sf);
@@ -3401,6 +3445,18 @@ static int sshfs_fgetattr(const char *path, struct stat *stbuf,
 		buf_free(&outbuf);
 	}
 	buf_free(&buf);
+
+	/*
+	int padding_length = 0;
+	if (sshfs.sync_read)
+		read_padding(&padding_length, sf, &sshfs_sync_read);
+	else
+		read_padding(&padding_length, sf, &sshfs_async_read);
+	debug("padding_length = %d\n", padding_length);
+	stbuf->st_size -= padding_length + BLOCK_BITS / 8 * 2;
+	debug("st_size = %d\n", stbuf->st_size);
+	*/
+
 	return err;
 }
 
