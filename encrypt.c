@@ -1,4 +1,4 @@
-/* This code mostly copies from https://github.com/crossbowerbt/monocrypt */
+/* Some of the code copies from https://github.com/crossbowerbt/monocrypt */
 
 #include "config.h"
 
